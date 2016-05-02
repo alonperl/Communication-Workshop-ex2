@@ -4,16 +4,68 @@ David Saper - 302598032 dav_sap
 Alon Perelmuter - 20063088 alonperl
 """
 
-from pox.core import core
-import pox.openflow.libopenflow_01 as of
-import time
 
 from pox.core import core
 import pox.openflow.libopenflow_01 as of
 from utils import *
 from pox.lib.packet.lldp import lldp, chassis_id, port_id, ttl, end_tlv
 from pox.lib.packet.ethernet import ethernet
+import pox.openflow.nicira as nx
+import time
+from pox.lib.addresses import EthAddr, IPAddr
+from pox.lib.packet.arp import arp
+from pox.lib.packet.ipv4 import ipv4
+from pox.lib.packet.icmp import echo, unreach, icmp
+import struct
+
+# our own imports
+import itertools
+
+CONFIG_FILENAME = '/home/mininet/config'
 log = core.getLogger()
+
+
+class RoutingTable(object):
+    def __init__(self):
+        self.table = {}
+
+    def add(self, address, mask, destination):
+        """
+        Adds an address with a specified subnet mask and destination port to the routing table. Parameters:
+        address: IP address (String of four integers in [0,255], such as "10.0.0.1")
+        mask: Subnet mask (String of four integers in [0,255], such as "255.255.255.0")
+        destination: Either a port number, or some other value, as you wish to have in the table.
+        The method does not return any value. If an entry exists for the same masked address, then the old entry is replaced by the new entry.
+        """
+        tup_mask = self.ipv4_str_to_int_tuple(mask)
+        address_subnet = self.ipv4_get_subnet(self.ipv4_str_to_int_tuple(address),tup_mask)
+        self.table[(address_subnet,tup_mask)] = destination
+    def ipv4_str_to_int_tuple(self,ip_str):
+        return tuple(map(int,ip_str.split(".")))
+    def ipv4_get_subnet(self,ipv4_tup,mask_tup):
+        return tuple(x & y for x, y in itertools.izip(ipv4_tup, mask_tup))
+
+    def ipv4_tup_to_str(self,addr):
+        return str(t).replace("(","").replace(")","").replace(", ",".")
+    def lookup(self, address):
+        """
+        Looks up a given address in the table. Parameter address is a string of an IP address
+        (as in add). If there is a corresponding entry in the table (with regard to address and subnet mask),
+        then the destination of that entry is returned. Otherwise, the method returns None.
+        """
+        address_tup = self.ipv4_str_to_int_tuple(address)
+        for key,dest in self.table.iteritems():
+            if self.ipv4_get_subnet(address_tup,key[1]) == key[0]:
+                return dest
+
+    def __str__(self):
+        table_str = ''
+        for key,dest in self.table.iteritems():
+            table_str += '\nsubnet: '+ self.ipv4_tup_to_str(key[0]+ ", mask: " +
+                                                            self.ipv4_tup_to_str(key[1]) + ", destination: " + dest)
+
+class Network(object):
+
 
 class Tutorial (object):
     """

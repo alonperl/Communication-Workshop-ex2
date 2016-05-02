@@ -82,6 +82,9 @@ class Node(object):
 
     def __str__(self):
         return str(self.dpid)
+# class IPv4:
+#     def __init__(self,ipv4_str):
+#
 
 class Graph:
     def __init__(self):
