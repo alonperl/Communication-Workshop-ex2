@@ -65,6 +65,20 @@ class RoutingTable(object):
                                                             self.ipv4_tup_to_str(key[1]) + ", destination: " + dest)
 
 class Network(object):
+    __metaclass__ = SingletonType
+    class Router(object):
+        def __init__(self,dpid):
+            self.dpid = dpid
+            self.ports = {} # id:ports(object)
+    class Port(object):
+
+
+
+
+    def __init__(self):
+        parser(CONFIG_FILENAME)
+
+
 
 
 class Tutorial (object):
