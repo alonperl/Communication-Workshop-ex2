@@ -18,8 +18,10 @@ from pox.lib.packet.ipv4 import ipv4
 from pox.lib.packet.icmp import echo, unreach, icmp
 import struct
 
+
 # our own imports
 import itertools
+import threading
 
 CONFIG_FILENAME = '/home/mininet/config'
 log = core.getLogger()
@@ -38,15 +40,21 @@ class RoutingTable(object):
         The method does not return any value. If an entry exists for the same masked address, then the old entry is replaced by the new entry.
         """
         tup_mask = self.ipv4_str_to_int_tuple(mask)
-        address_subnet = self.ipv4_get_subnet(self.ipv4_str_to_int_tuple(address),tup_mask)
-        self.table[(address_subnet,tup_mask)] = destination
-    def ipv4_str_to_int_tuple(self,ip_str):
-        return tuple(map(int,ip_str.split(".")))
-    def ipv4_get_subnet(self,ipv4_tup,mask_tup):
+        address_subnet = self.ipv4_get_subnet(self.ipv4_str_to_int_tuple(address), tup_mask)
+        self.table[(address_subnet, tup_mask)] = destination
+
+    @staticmethod
+    def ipv4_str_to_int_tuple(ip_str):
+        return tuple(map(int, ip_str.split(".")))
+
+    @staticmethod
+    def ipv4_get_subnet(ipv4_tup, mask_tup):
         return tuple(x & y for x, y in itertools.izip(ipv4_tup, mask_tup))
 
-    def ipv4_tup_to_str(self,addr):
-        return str(t).replace("(","").replace(")","").replace(", ",".")
+    @staticmethod
+    def ipv4_tup_to_str(addr):
+        return str(addr).replace("(", "").replace(")", "").replace(", ", ".")
+
     def lookup(self, address):
         """
         Looks up a given address in the table. Parameter address is a string of an IP address
@@ -54,32 +62,114 @@ class RoutingTable(object):
         then the destination of that entry is returned. Otherwise, the method returns None.
         """
         address_tup = self.ipv4_str_to_int_tuple(address)
-        for key,dest in self.table.iteritems():
-            if self.ipv4_get_subnet(address_tup,key[1]) == key[0]:
+        for key, dest in self.table.iteritems():
+            if self.ipv4_get_subnet(address_tup, key[1]) == key[0]:
                 return dest
 
     def __str__(self):
         table_str = ''
-        for key,dest in self.table.iteritems():
-            table_str += '\nsubnet: '+ self.ipv4_tup_to_str(key[0]+ ", mask: " +
+        for key, dest in self.table.iteritems():
+            table_str += '\nsubnet: ' + self.ipv4_tup_to_str(key[0] + ", mask: " +
                                                             self.ipv4_tup_to_str(key[1]) + ", destination: " + dest)
 
+
 class Network(object):
-    __metaclass__ = SingletonType
+    # __metaclass__ = SingletonType
+
     class Router(object):
-        def __init__(self,dpid):
+        def __init__(self, dpid):
             self.dpid = dpid
-            self.ports = {} # id:ports(object)
+            self.ports = {}  # id:ports(object)
+
     class Port(object):
+        def __init__(self):
+            self.__ip = None
+            self.__mask = None
+            self.__mac = None
+        @property
+        def ip(self):
+            return self.__ip
 
+        @ip.setter
+        def ip(self, value):
+            self.__ip = value
 
+        @property
+        def mask(self):
+            return self.__mask
 
+        @mask.setter
+        def mask(self, value):
+            self.__mask = value
+
+        @property
+        def mac(self):
+            return self.__mac
+
+        @mac.setter
+        def mac(self, value):
+            self.__mac = value
 
     def __init__(self):
-        parser(CONFIG_FILENAME)
+        self.routers = {}  # id:Router(object)
+        self.edges = {}  # (Port1, Port2) : cost
+        self.lock = threading.Lock()
+        self.parse_config()
 
+    ROUTER = 'router'
+    NUM_OF_ATTRIB = 3
+    LINK = 'link'
+    PORTS = 'ports'
+    END_OF_FILE = ''
+    RELOAD = 'reload'
+    FILENAME = 'config.txt'
 
+    def parse_config(self):
+        f = open(self.FILENAME, 'r')
+        line = f.readline()
+        while line != self.END_OF_FILE:
+            split_line = line.split()
+            if line.startswith(self.ROUTER):
+                r = self.Router(int(split_line[1]))
+                line = f.readline()
+                if line.startswith(self.PORTS):
+                    split_line = line.split()
 
+                    for i in range(int(split_line[1])):
+                        port_dpid = f.readline().split()
+                        r.ports[int(port_dpid[1])] = self.Port()
+
+                        for attrib in range(self.NUM_OF_ATTRIB):
+                            port_attrib = f.readline().split()
+                            setattr(r.ports[int(port_dpid[1])], port_attrib[0], port_attrib[1])
+                self.lock.acquire()
+                self.routers[r.dpid] = r
+                self.lock.release()
+                line = f.readline()
+            elif line.startswith(self.LINK):
+                split_line = f.readline().split()
+                edge_one = split_line[1].split(',')
+                self.lock.acquire()
+                port_one = self.routers[int(edge_one[0])].ports[int(edge_one[1])]
+                split_line = f.readline().split()
+                edge_two = split_line[1].split(',')
+                port_two = self.routers[int(edge_two[0])].ports[int(edge_two[1])]
+                split_line = f.readline().split()
+                self.edges[(port_one, port_two)] = split_line[1]
+                self.lock.release()
+                line = f.readline()
+            elif line.startswith('\n'):
+                line = f.readline()
+            elif line.startswith(self.RELOAD):
+                split_line = line.split()
+                self.lock.acquire()
+                self.routers.clear()
+                self.edges.clear()
+                self.lock.release()
+                threading.Timer(int(split_line[1]), self.parse_config).start()
+                line = f.readline()
+            elif line.startswith(self.END_OF_FILE):
+                break
 
 class Tutorial (object):
     """
