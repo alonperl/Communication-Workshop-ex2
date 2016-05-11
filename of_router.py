@@ -70,12 +70,11 @@ class RoutingTable(object):
     def __str__(self):
         table_str = ''
         for key, dest in self.table.iteritems():
-            table_str += '\nsubnet: ' + self.ipv4_tup_to_str(key[0] + ", mask: " +
-                                                            self.ipv4_tup_to_str(key[1]) + ", destination: " + dest)
-
-
+            table_str += '\nsubnet: ' + self.ipv4_tup_to_str(key[0]) + ", mask: " +\
+                                                            self.ipv4_tup_to_str(key[1]) + ", destination: " + str(dest.id)
+        return  table_str
 class Network(object):
-    __metaclass__ = SingletonType
+    # __metaclass__ = SingletonType
 
     class Router(object):
         def __init__(self, dpid):
@@ -89,6 +88,7 @@ class Network(object):
             self.__mask = None
             self.__mac = None
             self.__router = None
+            self.__id = None
 
         @property
         def router(self):
@@ -97,6 +97,14 @@ class Network(object):
         @router.setter
         def router(self, value):
             self.__router = value
+
+        @property
+        def id(self):
+            return self.__id
+
+        @id.setter
+        def id(self, value):
+            self.__id = value
 
         @property
         def ip(self):
@@ -154,7 +162,7 @@ class Network(object):
                     for i in range(int(split_line[1])):
                         port_dpid = f.readline().split()
                         r.ports[int(port_dpid[1])] = self.Port()
-
+                        setattr(r.ports[int(port_dpid[1])], 'id', int(port_dpid[1]))
                         for attrib in range(self.NUM_OF_ATTRIB):
                             port_attrib = f.readline().split()
                             setattr(r.ports[int(port_dpid[1])], port_attrib[0], port_attrib[1])
@@ -192,17 +200,26 @@ class Network(object):
 
         shortest_paths = self.compute_dijkstra(router_id)
         for r_id,rout in self.routers.iteritems():
-            for port_id,port in rout.iteritems():
-                if not r.table.lookup(port.ip):
-                    next_rout = self.get_router_by_id(shortest_paths[r_id])
-                    self.find_port(rout, next_rout)
-
-                    r.table.add(port.ip,port.mask, )
-
-
+            if rout is not r:
+                for port_id,port in rout.ports.iteritems():
+                    if not r.table.lookup(port.ip):
+                        next_rout = self.get_router_by_id(shortest_paths[r_id])
+                        r.table.add(port.ip, port.mask, self.find_port(r, next_rout))
 
     def find_port(self, router_src, router_dest):
+        ports = priority_dict()
+        print "FIND PORT:",router_src.dpid, router_dest.dpid
         for edge in self.edges:
+            print "EDGE: ",edge[0].router.dpid, edge[1].router.dpid
+            if router_src == edge[0].router and router_dest == edge[1].router:
+                ports[edge[0]] = self.edges[edge]
+            if router_src == edge[1].router and router_dest == edge[0].router:
+                ports[edge[1]] = self.edges[edge]
+        print ports
+        return ports.pop_smallest()
+
+
+
 
     def get_router_by_id(self, dpid):
         for r_id,r in self.routers.iteritems():
@@ -226,9 +243,11 @@ class Network(object):
                     if alt < q[v[0]]:
                         q[v[0]] = alt
                         prev[v[0]] = u
+        # for key, val in prev.iteritems():
+        #     print key.dpid, val.dpid
         next_hop = self.get_next_hop(src_router, prev)
         # for key, val in next_hop.iteritems():
-        #     print key.dpid, val.dpid
+            # print key.dpid, val.dpid
         return next_hop
 
     def get_next_hop(self, src_router, prev_list):
@@ -261,11 +280,21 @@ class Network(object):
         return neighbors
 
     def get_router(self, port):
+        ret = None
         for edge in self.edges:
             if port == edge[0]:
-                return edge[1].router, self.edges[edge]
+                if ret:
+                    if ret[1] > self.edges[edge]:
+                        ret = edge[1].router, self.edges[edge]
+                else:
+                    ret = edge[1].router, self.edges[edge]
             elif port == edge[1]:
-                return edge[0].router, self.edges[edge]
+                if ret:
+                    if ret[1] > self.edges[edge]:
+                        ret = edge[0].router, self.edges[edge]
+                else:
+                    ret =  edge[0].router, self.edges[edge]
+        return ret
 class Tutorial (object):
     """
     A Tutorial object is created for each switch that connects.
@@ -274,9 +303,119 @@ class Tutorial (object):
     def __init__ (self, connection):
         self.forward_table = {}
         self.connection = connection
-
+        self.arp_cache = {}
+        self.waiting_arp_requests = {}
         # This binds our PacketIn event listener
         connection.addListeners(self)
+        self.arp_timer = Timer(3,self.clean_arp_cache(),recurring=True)
+        self.network = Network()
+
+    def clean_arp_cache(self):
+        for ip, arp_req in self.waiting_arp_requests.iteritems():
+            if arp_req[2] - time.time() > 3:
+                self.handle_ip(self.waiting_arp_requests[ip])
+                #TODO: to check if del is not deleting the tuple
+                del self.waiting_arp_requests[ip]
+                self.arp_cache[ip] = (None, time.time())
+        for ip, arp_data in self.arp_cache.iteritems():
+            if arp_data[0] is None and arp_data[1] - time.time() > 5 or\
+               arp_data[1] - time.time() > 3600:
+                del self.arp_cache[ip]
+
+    def handle_arp(self, packet, packet_in):
+        port = self.network.routers[self.connection.dpid].ports[packet_in.in_port]
+
+        if packet.payload.opcode == arp.REQUEST and port.ip == str(packet.payload.protodst):
+            my_arp = arp()
+            my_arp.opcode = arp.REPLY
+            my_arp.protosrc = IPAddr(port.ip)
+            my_arp.protodst = packet.payload.protosrc
+            my_arp.hwdst = packet.payload.hwsrc
+            my_arp.hwsrc = EthAddr(port.mac)
+
+            my_ether = ethernet()
+            my_ether.type = ethernet.ARP_TYPE
+            my_ether.dst = packet.payload.hwsrc
+            my_ether.src = EthAddr(port.mac)
+            my_ether.payload = my_arp
+            #todo : send the arp reply
+
+        elif packet.payload.opcode is arp.REPLY and port.mac == str(packet.payload.hwdst):
+            if self.waiting_arp_requests[str(packet.payload.protosrc)]:
+                self.arp_cache[str(packet.payload.protosrc)] = (packet.payload.hwsrc, time.time())
+                del self.waiting_arp_requests[str(packet.payload.protosrc)]
+                self.handle_ip(self.arp_cache[str(packet.payload.protosrc)])
+
+    def send_arp_request(self, req_ip, port):
+        my_arp = arp()
+        my_arp.opcode = arp.REQUEST
+        my_arp.protosrc = IPAddr(port.ip)
+        my_arp.protodst = IPAddr(req_ip)
+        my_arp.hwdst = EthAddr('FF:FF:FF:FF:FF:FF')
+        my_arp.hwsrc = EthAddr(port.mac)
+
+        my_ether = ethernet()
+        my_ether.type = ethernet.ARP_TYPE
+        my_ether.dst = EthAddr('FF:FF:FF:FF:FF:FF')
+        my_ether.src = EthAddr(port.mac)
+        my_ether.payload = my_arp
+
+        self.send_packet(None, my_ether, port.id, of.OFPP_NONE)
+
+    def send_icmp(self, tp, code, dest_ip, dest_mac, dest_port, orig_packet):
+        # Should be able to send echo reply (tp=0,code=0),
+        # destination unreachable (tp=3,code=0(network unreachable)/1(host unreachable)/3(port unreachable)),
+        # TTL expired (tp=11,code=0)
+
+        msg = None
+        if tp == 0:
+            p = orig_packet.payload
+            while p is not None and not isinstance(p, echo):
+                p = p.next
+            if p is None:
+                return
+            r = echo(id=p.id, seq=p.seq)
+            r.set_payload(p.next)
+            msg = icmp(type=0, code=0)
+            msg.set_payload(r)
+        elif tp == 3:
+            msg = icmp()
+            msg.type = 3
+            msg.code = code
+            d = orig_packet.pack()
+            d = d[:orig_packet.hl * 4 + 8]
+            d = struct.pack("!HH", 0, 0) + d
+            msg.payload = d
+        elif tp == 11:
+            msg = icmp()
+            msg.type = 11
+            msg.code = 0
+            d = orig_packet.pack()
+            d = d[:orig_packet.hl * 4 + 8]
+            d = struct.pack("!HH", 0, 0) + d
+            msg.payload = d
+
+        # Make the IP packet around it
+        ipp = ipv4()
+        ipp.protocol = ipp.ICMP_PROTOCOL
+        ipp.srcip = IPAddr(dest_port.ip)
+        ipp.dstip = IPAddr(dest_ip)
+
+        # Ethernet around that...
+        e = ethernet()
+        e.src = EthAddr(dest_port.mac)
+        e.dst = EthAddr(dest_mac)
+        e.type = e.IP_TYPE
+
+        # Hook them up...
+        ipp.payload = msg
+        e.payload = ipp
+
+        # send this packet to the switch
+        log.debug(
+            '[r%d] Sending ICMP TYPE %d for IP %s on port %d' % (self.connection.dpid, tp, dest_ip, dest_port.port_id))
+        self.send_packet(None, e, dest_port.port_id, of.OFPP_NONE)
+        #todo : check send_packet
 
     def _handle_PacketIn (self, event):
         """
