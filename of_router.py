@@ -26,7 +26,7 @@ import threading
 
 CONFIG_FILENAME = '/home/mininet/config'
 log = core.getLogger()
-
+tutorial_list = {}
 
 class RoutingTable(object):
     def __init__(self):
@@ -74,13 +74,14 @@ class RoutingTable(object):
                                                             self.ipv4_tup_to_str(key[1]) + ", destination: " + str(dest.id)
         return  table_str
 class Network(object):
-    # __metaclass__ = SingletonType
+    __metaclass__ = SingletonType
 
     class Router(object):
         def __init__(self, dpid):
             self.dpid = dpid
             self.ports = {}  # id:ports(object)
-            self.table = RoutingTable()
+            self.tutorial = None
+
 
     class Port(object):
         def __init__(self):
@@ -131,9 +132,11 @@ class Network(object):
             self.__mac = value
 
     def __init__(self):
+        log.debug("!!!!!!!!!!!!!!!!! NETWORK INIT")
         self.routers = {}  # id:Router(object)
-        self.edges = {}  # ((R,Port1),(R,Port2)) : cost
+        self.edges = {}  # ((Port1 obj),(Port2 obj)) : cost
         self.lock = threading.Lock()
+        self.parsed = False
         self.parse_config()
 
     ROUTER = 'router'
@@ -142,19 +145,22 @@ class Network(object):
     PORTS = 'ports'
     END_OF_FILE = ''
     RELOAD = 'reload'
-    FILENAME = 'config.txt'
+    FILENAME = CONFIG_FILENAME
 
     def parse_config(self):
+        log.debug("####################### CONFIG CALLED #################")
         self.lock.acquire()
         self.routers.clear()
         self.edges.clear()
-        self.lock.release()
         f = open(self.FILENAME, 'r')
         line = f.readline()
         while line != self.END_OF_FILE:
             split_line = line.split()
             if line.startswith(self.ROUTER):
                 r = self.Router(int(split_line[1]))
+                self.routers[r.dpid] = r
+                if self.parsed and r.dpid in tutorial_list:
+                    self.set_tutorial(r.dpid, tutorial_list[r.dpid])
                 line = f.readline()
                 if line.startswith(self.PORTS):
                     split_line = line.split()
@@ -167,64 +173,110 @@ class Network(object):
                             port_attrib = f.readline().split()
                             setattr(r.ports[int(port_dpid[1])], port_attrib[0], port_attrib[1])
                         setattr(r.ports[int(port_dpid[1])], self.ROUTER, r)
-                    self.lock.acquire()
-                    self.routers[r.dpid] = r
-                    self.lock.release()
+
                 line = f.readline()
             elif line.startswith(self.LINK):
                 split_line = f.readline().split()
                 edge_one = split_line[1].split(',')
-                self.lock.acquire()
+
                 port_one = self.routers[int(edge_one[0])].ports[int(edge_one[1])]
                 split_line = f.readline().split()
                 edge_two = split_line[1].split(',')
                 port_two = self.routers[int(edge_two[0])].ports[int(edge_two[1])]
                 split_line = f.readline().split()
                 self.edges[(port_one, port_two)] = int(split_line[1])
-                self.lock.release()
+
                 line = f.readline()
             elif line.startswith('\n'):
                 line = f.readline()
             elif line.startswith(self.RELOAD):
                 split_line = line.split()
-                threading.Timer(int(split_line[1]), self.parse_config).start()
+                if not self.parsed:
+                    Timer(interval=int(split_line[1]), function=self.parse_config, args=[], recurring=True)
                 line = f.readline()
             elif line.startswith(self.END_OF_FILE):
                 break
+        if self.parsed:
+            self.update_flow_rules()
+        self.parsed = True
+        self.lock.release()
+
+    def update_flow_rules(self):
+        """
+            fm = of.ofp_flow_mod()
+            fm.match.dl_type = ethernet.IP_TYPE
+            fm.match.in_port = packet_in.in_port
+            fm.match.nw_dst = IPAddr(destIP)
+
+            if packet_in.buffer_id != -1 and packet_in.buffer_id is not None:
+                # Valid buffer ID was sent from switch, we do not need to encapsulate raw data in response
+                fm.buffer_id = packet_in.buffer_id
+            else:
+                if packet_in.data is not None:
+                    # No valid buffer ID was sent but raw data exists, send raw data with flow_mod
+                    fm.data = packet_in.data
+                else:
+                    return
+            if not drop:
+                if destMac:
+                    fm.actions.append(of.ofp_action_dl_addr.set_dst(EthAddr(destMac)))
+                fm.actions.append(nx.nx_action_dec_ttl())
+                fm.actions.append(of.ofp_action_output(destPort.id))
+
+            self.flow_rules = [] # [(packet_in.in_port, destIP, dest_port, destMac)]
+            """
+        log.debug("In update flow rules!")
+        for r_id, r in self.routers.iteritems():
+            r_table = self.get_routing_table(r_id)
+            if r.tutorial:
+                for fr in r.tutorial.flow_rules:
+                    # check if there is port conflict for old flow mod vs. new routing table
+                    lookup = r_table.lookup(fr[1])
+                    if lookup and lookup.id == fr[2]:
+                        continue
+                    else:
+                        fm = of.ofp_flow_mod()
+                        fm.command = of.OFPFC_DELETE
+                        fm.match.in_port = fr[0]
+                        fm.match.dl_dst = EthAddr(fr[3])
+                        fm.match.nw_dst = IPAddr(fr[1])
+                        r.tutorial.connection.send(fm)
+            else:
+                log.debug("rid: {} Tutorial not exist".format(r_id))
 
     def get_routing_table(self, router_id):
-        #add all the local subnets to the routing table
+        # add all the local subnets to the routing table
         r = self.get_router_by_id(router_id)
-        for port_id,port in r.ports.iteritems():
-            r.table.add(port.ip,port.mask,port)
+        r_table = RoutingTable()
+        for port_id, port in r.ports.iteritems():
+            r_table.add(port.ip,port.mask,port)
 
         shortest_paths = self.compute_dijkstra(router_id)
         for r_id,rout in self.routers.iteritems():
             if rout is not r:
-                for port_id,port in rout.ports.iteritems():
-                    if not r.table.lookup(port.ip):
+                for port_id, port in rout.ports.iteritems():
+                    if not r_table.lookup(port.ip):
                         next_rout = self.get_router_by_id(shortest_paths[r_id])
-                        r.table.add(port.ip, port.mask, self.find_port(r, next_rout))
+                        r_table.add(port.ip, port.mask, self.find_port(r, next_rout))
+        return r_table
 
     def find_port(self, router_src, router_dest):
         ports = priority_dict()
-        print "FIND PORT:",router_src.dpid, router_dest.dpid
+
         for edge in self.edges:
-            print "EDGE: ",edge[0].router.dpid, edge[1].router.dpid
+
             if router_src == edge[0].router and router_dest == edge[1].router:
                 ports[edge[0]] = self.edges[edge]
             if router_src == edge[1].router and router_dest == edge[0].router:
                 ports[edge[1]] = self.edges[edge]
-        print ports
+
         return ports.pop_smallest()
-
-
-
 
     def get_router_by_id(self, dpid):
         for r_id,r in self.routers.iteritems():
             if r_id == dpid:
                 return r
+
     def compute_dijkstra(self, src_router_id):
         src_router = self.get_router_by_id(src_router_id)
         q = priority_dict()
@@ -265,6 +317,7 @@ class Network(object):
                         next_hop[r.dpid] = tmp.dpid
                     tmp = prev_list[tmp]
         return next_hop
+
     def compute_ospf(self):
         ospf = {}
         for r_id in self.routers:
@@ -295,6 +348,10 @@ class Network(object):
                 else:
                     ret =  edge[0].router, self.edges[edge]
         return ret
+
+    def set_tutorial(self, dpid, t):
+        self.routers[dpid].tutorial = t
+
 class Tutorial (object):
     """
     A Tutorial object is created for each switch that connects.
@@ -303,26 +360,123 @@ class Tutorial (object):
     def __init__ (self, connection):
         self.forward_table = {}
         self.connection = connection
-        self.arp_cache = {}
-        self.waiting_arp_requests = {}
+        self.arp_cache = {} # ip : (mac_address, timestamp)
+        self.waiting_arp_requests = {} # ip : (packet, packet-in, timestamp)
         # This binds our PacketIn event listener
         connection.addListeners(self)
-        self.arp_timer = Timer(3,self.clean_arp_cache(),recurring=True)
+        self.lock = threading.Lock()
         self.network = Network()
+        self.flow_rules = []  # [(packet_in.in_port, destIP, dest_port, destMac)]
+        self.arp_timer = Timer(interval=3, function=self.clean_arp_cache, args=[], recurring=True)
 
     def clean_arp_cache(self):
+        self.lock.acquire()
         for ip, arp_req in self.waiting_arp_requests.iteritems():
             if arp_req[2] - time.time() > 3:
-                self.handle_ip(self.waiting_arp_requests[ip])
-                #TODO: to check if del is not deleting the tuple
+                # handle_ip to reply for the packet that host unreachable
+                self.handle_ip(self.waiting_arp_requests[ip][0], self.waiting_arp_requests[ip][1])
+                # TODO: to check if del is not deleting the tuple
                 del self.waiting_arp_requests[ip]
                 self.arp_cache[ip] = (None, time.time())
         for ip, arp_data in self.arp_cache.iteritems():
             if arp_data[0] is None and arp_data[1] - time.time() > 5 or\
                arp_data[1] - time.time() > 3600:
                 del self.arp_cache[ip]
+        self.lock.release()
+
+    def handle_ip(self, packet, packet_in):
+        self.network.lock.acquire()
+        r_table = self.network.get_routing_table(self.connection.dpid)
+        dest_ip = str(packet.payload.dstip)
+        dest_port = r_table.lookup(dest_ip) # Port object
+        in_port_data = self.network.routers[self.connection.dpid].ports[packet_in.in_port]
+
+        if dest_port and packet.payload.ttl > 1:
+            # 7.C
+            if dest_port.id != packet_in.in_port:
+                mask_tup = r_table.ipv4_str_to_int_tuple(dest_port.mask)
+                dest_port_subnet = r_table.ipv4_get_subnet(r_table.ipv4_str_to_int_tuple(dest_port.ip), mask_tup)
+                dest_ip_subnet_dest_mask = r_table.ipv4_get_subnet(r_table.ipv4_str_to_int_tuple(dest_ip), mask_tup)
+                # 7.C.a
+
+                if dest_ip_subnet_dest_mask == dest_port_subnet:
+                    #TODO: check if dest_ip must be in this case in the arp cache
+                    if self.arp_cache[dest_ip]:
+                        # I
+                        if self.arp_cache[dest_ip][0]:
+                            dest_mac = self.arp_cache[dest_ip][0]
+                            self.send_router_flow(dest_ip, packet_in, dest_port, dest_mac)
+                        # II
+                        else:
+                            self.send_icmp(3, 1, str(packet.payload.srcip), str(packet.payload.hwsrc), in_port_data, packet)
+                            self.network.lock.release()
+                            return
+                    else:
+                        # III
+                        self.waiting_arp_requests[dest_ip] = (packet, packet_in, time.time())
+                        self.send_arp_request(dest_ip, dest_port)
+                        self.network.lock.release()
+                        return
+                self.send_router_flow(dest_ip, packet_in, dest_port, None)
+            # 7.D
+            elif dest_port.id == packet_in.in_port:
+                if dest_ip == in_port_data.ip:
+                    if packet.payload.protocol == ipv4.ICMP_PROTOCOL:
+                        # 7.D.a.i --> ICMP ECHO REQUEST
+                        if packet.payload.payload.type == 8:
+                            self.send_icmp(0, 0, str(packet.payload.srcip), str(packet.src), in_port_data, packet)
+                        # ii
+                        else:
+                            self.network.lock.release()
+                            return
+                    # iii if not ICMP
+                    else:
+                        self.send_icmp(3, 3, str(packet.payload.srcip), str(packet.src), in_port_data,
+                                    packet)
+                # If the destination IP address is not the IP address of the port the packet
+                # came on - drop
+                # 7.D.b
+                else:
+                    self.send_router_flow(dest_ip, packet_in, None, None, drop=True)
+        # 7.E If TTL is less than 2, packet should be dropped and an ICMP TTL Expired (type=11, code=0)
+        #  message should be sent to the source IP address.
+        elif dest_port and packet.payload.ttl <= 1:
+            self.send_icmp(11, 0, str(packet.payload.srcip), str(packet.src), in_port_data,
+                           packet)
+        # 7.F If the destination port is None (unknown), the destination network is unreachable from this router.
+        # Send an ICMP Destination Network Unreachable (type=3, code=0) message to the source IP address.
+        elif not dest_port:
+            self.send_icmp(3, 0, str(packet.payload.srcip), str(packet.src), in_port_data,
+                           packet)
+        self.network.lock.release()
+
+    def send_router_flow(self, dest_ip, packet_in, dest_port, dest_mac, drop=False):
+        # install flow rule
+        fm = of.ofp_flow_mod()
+        fm.match.dl_type = ethernet.IP_TYPE
+        fm.match.in_port = packet_in.in_port
+        fm.match.nw_dst = IPAddr(dest_ip)
+
+        if packet_in.buffer_id != -1 and packet_in.buffer_id is not None:
+            # Valid buffer ID was sent from switch, we do not need to encapsulate raw data in response
+            fm.buffer_id = packet_in.buffer_id
+        else:
+            if packet_in.data is not None:
+                # No valid buffer ID was sent but raw data exists, send raw data with flow_mod
+                fm.data = packet_in.data
+            else:
+                return
+        if not drop:
+            if dest_mac:
+                fm.actions.append(of.ofp_action_dl_addr.set_dst(EthAddr(dest_mac)))
+            fm.actions.append(nx.nx_action_dec_ttl())
+            fm.actions.append(of.ofp_action_output(port = dest_port.id))
+
+        self.flow_rules.append((packet_in.in_port, dest_ip, dest_port, dest_mac))
+        self.connection.send(fm)
 
     def handle_arp(self, packet, packet_in):
+        self.network.lock.acquire()
         port = self.network.routers[self.connection.dpid].ports[packet_in.in_port]
 
         if packet.payload.opcode == arp.REQUEST and port.ip == str(packet.payload.protodst):
@@ -338,13 +492,15 @@ class Tutorial (object):
             my_ether.dst = packet.payload.hwsrc
             my_ether.src = EthAddr(port.mac)
             my_ether.payload = my_arp
-            #todo : send the arp reply
+            self.send_packet(None, my_ether, packet_in.in_port, of.OFPP_NONE)
 
         elif packet.payload.opcode is arp.REPLY and port.mac == str(packet.payload.hwdst):
             if self.waiting_arp_requests[str(packet.payload.protosrc)]:
                 self.arp_cache[str(packet.payload.protosrc)] = (packet.payload.hwsrc, time.time())
+                self.handle_ip(self.waiting_arp_requests[str(packet.payload.protosrc)][0], self.waiting_arp_requests[str(packet.payload.protosrc)][1])
                 del self.waiting_arp_requests[str(packet.payload.protosrc)]
-                self.handle_ip(self.arp_cache[str(packet.payload.protosrc)])
+                #TODO: check if handle_ip call is
+        self.network.lock.release()
 
     def send_arp_request(self, req_ip, port):
         my_arp = arp()
@@ -413,8 +569,8 @@ class Tutorial (object):
 
         # send this packet to the switch
         log.debug(
-            '[r%d] Sending ICMP TYPE %d for IP %s on port %d' % (self.connection.dpid, tp, dest_ip, dest_port.port_id))
-        self.send_packet(None, e, dest_port.port_id, of.OFPP_NONE)
+            '[r%d] Sending ICMP TYPE %d for IP %s on port %d' % (self.connection.dpid, tp, dest_ip, dest_port.id))
+        self.send_packet(None, e, dest_port.id, of.OFPP_NONE)
         #todo : check send_packet
 
     def _handle_PacketIn (self, event):
@@ -432,8 +588,12 @@ class Tutorial (object):
             return
 
         packet_in = event.ofp # packet_in is the OpenFlow packet sent by the switch
-
-        self.act_like_switch(packet, packet_in)
+        if self.connection.dpid in range(200, 300):
+            self.act_like_switch(packet, packet_in)
+        elif self.connection.dpid in range(100, 200):
+            self.act_like_router(packet, packet_in)
+        else:
+            log.debug("INVALID DPID: {} and should be in range [100,299]".format(self.connection.dpid))
 
     def send_packet (self, buffer_id, raw_data, out_port, in_port):
         """
@@ -488,6 +648,16 @@ class Tutorial (object):
         # Send message to switch
         self.connection.send(fm)
 
+    def act_like_router(self, packet, packet_in):
+
+        if packet.type == ethernet.IP_TYPE:
+            log.debug("act_like_router: IP_TYPE")
+            self.handle_ip(packet, packet_in)
+        elif packet.type == ethernet.ARP_TYPE:
+            log.debug("act_like_router: ARP_TYPE")
+            self.handle_arp(packet, packet_in)
+        else:
+            return
 
     def act_like_switch(self, packet, packet_in):
 
@@ -495,12 +665,11 @@ class Tutorial (object):
             self.remove_flow(packet.src)
         self.forward_table[packet.src] = packet_in.in_port
 
-
         if packet.dst in self.forward_table:
             log.debug('Found dest in table. Adding flow rule for: packet: dest = {}; src = {}; in_port = {}'.format(packet.dst, packet.src, packet_in.in_port))
             self.send_flow_mod(packet, packet_in, self.forward_table[packet.dst])
         else:
-            ####FLOODING
+            #### FLOODING
             log.debug('Flooding packet: dest = {}; src = {}; in_port = {}'.format(packet.dst, packet.src, packet_in.in_port))
             self.send_packet(packet_in.buffer_id, packet_in.data, of.OFPP_FLOOD, packet_in.in_port)
 
@@ -512,13 +681,19 @@ class Tutorial (object):
         self.connection.send(fm) # send flow-mod message
 
 
-
-def launch ():
+def launch():
     """
     Starts the component
     """
+    n = Network()
+
     def start_switch (event):
         log.debug("Controlling %s" % (event.connection,))
-        Tutorial(event.connection)
+        t = Tutorial(event.connection)
+        tutorial_list[event.connection.dpid] = t
+        if event.connection.dpid in range(100, 200):
+            n.set_tutorial(event.connection.dpid, t)
+
     core.openflow.addListenerByName("ConnectionUp", start_switch)
+
 
