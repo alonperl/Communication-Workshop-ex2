@@ -8,6 +8,7 @@ h6 route add default gw 10.0.1.1
 h7 route add default gw 10.0.2.1
 h8 route add default gw 10.0.2.1
 h9 route add default gw 10.0.2.1
+h10 route add default gw 10.0.3.1
 py "Current network:"
 net
 dump

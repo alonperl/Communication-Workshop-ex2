@@ -148,7 +148,6 @@ class Network(object):
     FILENAME = CONFIG_FILENAME
 
     def parse_config(self):
-        log.debug("####################### CONFIG CALLED #################")
         self.lock.acquire()
         self.routers.clear()
         self.edges.clear()
@@ -171,7 +170,7 @@ class Network(object):
                         setattr(r.ports[int(port_dpid[1])], 'id', int(port_dpid[1]))
                         for attrib in range(self.NUM_OF_ATTRIB):
                             port_attrib = f.readline().split()
-                            setattr(r.ports[int(port_dpid[1])], port_attrib[0], port_attrib[1])
+                            setattr(r.ports[int(port_dpid[1])], port_attrib[0], port_attrib[1].lower())
                         setattr(r.ports[int(port_dpid[1])], self.ROUTER, r)
 
                 line = f.readline()
@@ -203,43 +202,29 @@ class Network(object):
 
     def update_flow_rules(self):
         """
-            fm = of.ofp_flow_mod()
-            fm.match.dl_type = ethernet.IP_TYPE
-            fm.match.in_port = packet_in.in_port
-            fm.match.nw_dst = IPAddr(destIP)
 
-            if packet_in.buffer_id != -1 and packet_in.buffer_id is not None:
-                # Valid buffer ID was sent from switch, we do not need to encapsulate raw data in response
-                fm.buffer_id = packet_in.buffer_id
-            else:
-                if packet_in.data is not None:
-                    # No valid buffer ID was sent but raw data exists, send raw data with flow_mod
-                    fm.data = packet_in.data
-                else:
-                    return
-            if not drop:
-                if destMac:
-                    fm.actions.append(of.ofp_action_dl_addr.set_dst(EthAddr(destMac)))
-                fm.actions.append(nx.nx_action_dec_ttl())
-                fm.actions.append(of.ofp_action_output(destPort.id))
-
-            self.flow_rules = [] # [(packet_in.in_port, destIP, dest_port, destMac)]
             """
         log.debug("In update flow rules!")
         for r_id, r in self.routers.iteritems():
             r_table = self.get_routing_table(r_id)
             if r.tutorial:
                 for fr in r.tutorial.flow_rules:
+                    
                     # check if there is port conflict for old flow mod vs. new routing table
                     lookup = r_table.lookup(fr[1])
-                    if lookup and lookup.id == fr[2]:
+                    # if lookup:
+                    #     log.debug("r_id : {} r_table: {}\n lookup: {}".format(r_id, str(r_table), lookup.id))
+                    if lookup and lookup.id == fr[2].id:
                         continue
                     else:
                         fm = of.ofp_flow_mod()
                         fm.command = of.OFPFC_DELETE
-                        fm.match.in_port = fr[0]
-                        fm.match.dl_dst = EthAddr(fr[3])
+                        fm.match.in_port = int(fr[0])
+                        fm.match.dl_type = ethernet.IP_TYPE
+                        # fm.match.dl_dst = EthAddr(fr[3])
                         fm.match.nw_dst = IPAddr(fr[1])
+                        log.debug("Removing Flow Rule for router {}, port {}, dstip {}".format(r_id, fr[2].id, fr[1]))
+                        r.tutorial.flow_rules.remove(fr)
                         r.tutorial.connection.send(fm)
             else:
                 log.debug("rid: {} Tutorial not exist".format(r_id))
@@ -295,11 +280,9 @@ class Network(object):
                     if alt < q[v[0]]:
                         q[v[0]] = alt
                         prev[v[0]] = u
-        # for key, val in prev.iteritems():
-        #     print key.dpid, val.dpid
+
         next_hop = self.get_next_hop(src_router, prev)
-        # for key, val in next_hop.iteritems():
-            # print key.dpid, val.dpid
+
         return next_hop
 
     def get_next_hop(self, src_router, prev_list):
@@ -352,6 +335,7 @@ class Network(object):
     def set_tutorial(self, dpid, t):
         self.routers[dpid].tutorial = t
 
+
 class Tutorial (object):
     """
     A Tutorial object is created for each switch that connects.
@@ -390,67 +374,95 @@ class Tutorial (object):
         dest_ip = str(packet.payload.dstip)
         dest_port = r_table.lookup(dest_ip) # Port object
         in_port_data = self.network.routers[self.connection.dpid].ports[packet_in.in_port]
+        log.debug("handle_ip called in router_id: {} srcip: {} dstip: {} ttl: {}".format(self.connection.dpid,str(packet.payload.srcip),dest_ip, packet.payload.ttl))
 
         if dest_port and packet.payload.ttl > 1:
-            # 7.C
+
+            # 7.C - If the destination port is not None, and it is not the same port the packet came on
             if dest_port.id != packet_in.in_port:
                 mask_tup = r_table.ipv4_str_to_int_tuple(dest_port.mask)
                 dest_port_subnet = r_table.ipv4_get_subnet(r_table.ipv4_str_to_int_tuple(dest_port.ip), mask_tup)
                 dest_ip_subnet_dest_mask = r_table.ipv4_get_subnet(r_table.ipv4_str_to_int_tuple(dest_ip), mask_tup)
-                # 7.C.a
-
+                # 7.C.a - if the destination IP is in the subnet of the destination port
                 if dest_ip_subnet_dest_mask == dest_port_subnet:
-                    #TODO: check if dest_ip must be in this case in the arp cache
-                    if self.arp_cache[dest_ip]:
-                        # I
+
+                    if dest_ip in self.arp_cache:
+                        # I - If the destination IP address is in arp_cache and it is mapped to a valid MAC address.
                         if self.arp_cache[dest_ip][0]:
                             dest_mac = self.arp_cache[dest_ip][0]
-                            self.send_router_flow(dest_ip, packet_in, dest_port, dest_mac)
-                        # II
+                            log.debug("handle_ip router_id {}; part 7.C.a.I".format(self.connection.dpid))
+                            self.send_router_flow(dest_ip, packet_in, dest_port, dest_mac, False)
+                            self.network.lock.release()
+                            return
+                        # II - If the destination IP address is in arp_cache but it is mapped to None,
                         else:
+                            log.debug("handle_ip router_id {}; part 7.C.a.II".format(self.connection.dpid))
                             self.send_icmp(3, 1, str(packet.payload.srcip), str(packet.payload.hwsrc), in_port_data, packet)
                             self.network.lock.release()
                             return
+                    # III - If the destination IP is not in arp_cache at all
                     else:
-                        # III
+                        log.debug("handle_ip router_id {}; part 7.C.a.III".format(self.connection.dpid))
+                        log.debug("handle_ip router_id {}; Destination host ip {} -> MAC addr is unknown, ARP req sent"
+                                  " to find it".format(self.connection.dpid, dest_ip))
                         self.waiting_arp_requests[dest_ip] = (packet, packet_in, time.time())
                         self.send_arp_request(dest_ip, dest_port)
                         self.network.lock.release()
                         return
-                self.send_router_flow(dest_ip, packet_in, dest_port, None)
-            # 7.D
+                # 7.C.b - Create a flow_mod message to the router
+                self.send_router_flow(dest_ip, packet_in, dest_port, None, False)
+                self.network.lock.release()
+                log.debug("handle_ip router_id {}; part 7.C.b".format(self.connection.dpid))
+                return
+            # 7.D - If the destination port is the same port the packet came on
             elif dest_port.id == packet_in.in_port:
+                # 7.D.a - if the destination IP address is the IP address of the port the packet came on
                 if dest_ip == in_port_data.ip:
+
                     if packet.payload.protocol == ipv4.ICMP_PROTOCOL:
-                        # 7.D.a.i --> ICMP ECHO REQUEST
+                        # 7.D.a.I --> ICMP ECHO REQUEST
                         if packet.payload.payload.type == 8:
+                            log.debug("handle_ip router_id {}; part 7.D.a.I".format(self.connection.dpid))
+                            log.debug("handle_ip router_id {}; Got ICMP ECHO REQUEST from ip: ".format(
+                                self.connection.dpid, str(packet.payload.srcip)))
                             self.send_icmp(0, 0, str(packet.payload.srcip), str(packet.src), in_port_data, packet)
-                        # ii
+                        # 7.D.a.II - another type of ICMP --> ignore
                         else:
                             self.network.lock.release()
+                            log.debug("handle_ip router_id {}; part 7.D.a.II".format(self.connection.dpid))
+                            log.debug("handle_ip router_id {}; NOT AN ICMP IP_PACKET".format(self.connection.dpid))
                             return
-                    # iii if not ICMP
+                    # 7.D.a.III - if not ICMP
                     else:
-                        self.send_icmp(3, 3, str(packet.payload.srcip), str(packet.src), in_port_data,
-                                    packet)
-                # If the destination IP address is not the IP address of the port the packet
-                # came on - drop
-                # 7.D.b
+                        log.debug("handle_ip router_id {}; part 7.D.a.III".format(self.connection.dpid))
+                        log.debug("handle_ip router_id {}; Destination port for IP packet is unreachable".format(
+                            self.connection.dpid))
+                        self.send_icmp(3, 3, str(packet.payload.srcip), str(packet.src), in_port_data, packet)
+                        self.network.lock.release()
+                        return
+                # 7.D.b - If the destination IP address is not the IP address of the port the packet came on - drop
                 else:
-                    self.send_router_flow(dest_ip, packet_in, None, None, drop=True)
+                    log.debug("handle_ip router_id {}; part 7.D.b".format(self.connection.dpid))
+                    log.debug("handle_ip router_id {}; Destination host for IP : {} is unreachable".format(
+                        self.connection.dpid, dest_ip))
+                    self.send_router_flow(dest_ip, packet_in, None, None, True)
         # 7.E If TTL is less than 2, packet should be dropped and an ICMP TTL Expired (type=11, code=0)
         #  message should be sent to the source IP address.
         elif dest_port and packet.payload.ttl <= 1:
-            self.send_icmp(11, 0, str(packet.payload.srcip), str(packet.src), in_port_data,
-                           packet)
+            log.debug("handle_ip router_id {}; part 7.E".format(self.connection.dpid))
+            log.debug("handle_ip router_id {}; TTL exceeded".format(self.connection.dpid))
+            self.send_icmp(11, 0, str(packet.payload.srcip), str(packet.src), in_port_data, packet)
+            self.network.lock.release()
+            return
         # 7.F If the destination port is None (unknown), the destination network is unreachable from this router.
         # Send an ICMP Destination Network Unreachable (type=3, code=0) message to the source IP address.
         elif not dest_port:
-            self.send_icmp(3, 0, str(packet.payload.srcip), str(packet.src), in_port_data,
-                           packet)
+            log.debug("handle_ip router_id {}; part 7.F".format(self.connection.dpid))
+            log.debug("handle_ip router_id {}; destination network {} is unreachable".format(self.connection.dpid, str(packet.payload.dstip)))
+            self.send_icmp(3, 0, str(packet.payload.srcip), str(packet.src), in_port_data, packet)
         self.network.lock.release()
 
-    def send_router_flow(self, dest_ip, packet_in, dest_port, dest_mac, drop=False):
+    def send_router_flow(self, dest_ip, packet_in, dest_port, dest_mac, drop):
         # install flow rule
         fm = of.ofp_flow_mod()
         fm.match.dl_type = ethernet.IP_TYPE
@@ -469,16 +481,25 @@ class Tutorial (object):
         if not drop:
             if dest_mac:
                 fm.actions.append(of.ofp_action_dl_addr.set_dst(EthAddr(dest_mac)))
+                actions_str = "actions : dl_addr: " + str(dest_mac) + " dec_ttl , dest_port: " + str(dest_port.id)
+            else:
+                actions_str = "actions :  dec_ttl , dest_port: " + str(dest_port.id)
             fm.actions.append(nx.nx_action_dec_ttl())
-            fm.actions.append(of.ofp_action_output(port = dest_port.id))
+            fm.actions.append(of.ofp_action_output(port=dest_port.id))
 
+        else:
+            actions_str = "actions : Drop rule."
+        log.debug(
+            "Add flow rule for router {}; matching fields => dl_type: ethernet.IP_TYPE, in_port: {}, nw_dst: {} ".format(
+            self.connection.dpid, str(int(packet_in.in_port)), dest_ip) + actions_str)
         self.flow_rules.append((packet_in.in_port, dest_ip, dest_port, dest_mac))
+
         self.connection.send(fm)
 
     def handle_arp(self, packet, packet_in):
         self.network.lock.acquire()
         port = self.network.routers[self.connection.dpid].ports[packet_in.in_port]
-
+        log.debug("GOT ARP packet, type: {}; in port_mac {}; from hwsrc {}; to hwdst: {};".format(packet.payload.opcode, port.mac,str(packet.payload.hwsrc),str(packet.payload.hwdst)))
         if packet.payload.opcode == arp.REQUEST and port.ip == str(packet.payload.protodst):
             my_arp = arp()
             my_arp.opcode = arp.REPLY
@@ -492,14 +513,18 @@ class Tutorial (object):
             my_ether.dst = packet.payload.hwsrc
             my_ether.src = EthAddr(port.mac)
             my_ether.payload = my_arp
+            log.debug("Sending ARP REPLY at router {}, to dest_ip {}; to port {};".format(self.connection.dpid, str(packet.payload.protosrc), port.id))
             self.send_packet(None, my_ether, packet_in.in_port, of.OFPP_NONE)
 
         elif packet.payload.opcode is arp.REPLY and port.mac == str(packet.payload.hwdst):
-            if self.waiting_arp_requests[str(packet.payload.protosrc)]:
+            log.debug("GOT ARP REPLY at router {}; from src_mac {}; src_ip {}; input_port {}".format(self.connection.dpid, str(packet.payload.hwsrc),packet.payload.protosrc, packet_in.in_port))
+            if str(packet.payload.protosrc) in self.waiting_arp_requests:
                 self.arp_cache[str(packet.payload.protosrc)] = (packet.payload.hwsrc, time.time())
+                self.network.lock.release()
                 self.handle_ip(self.waiting_arp_requests[str(packet.payload.protosrc)][0], self.waiting_arp_requests[str(packet.payload.protosrc)][1])
+                self.network.lock.acquire()
                 del self.waiting_arp_requests[str(packet.payload.protosrc)]
-                #TODO: check if handle_ip call is
+                # TODO: check if handle_ip call is
         self.network.lock.release()
 
     def send_arp_request(self, req_ip, port):
@@ -538,16 +563,16 @@ class Tutorial (object):
             msg = icmp()
             msg.type = 3
             msg.code = code
-            d = orig_packet.pack()
-            d = d[:orig_packet.hl * 4 + 8]
+            d = orig_packet.payload.pack()
+            d = d[:orig_packet.payload.hl * 4 + 8]
             d = struct.pack("!HH", 0, 0) + d
             msg.payload = d
         elif tp == 11:
             msg = icmp()
             msg.type = 11
             msg.code = 0
-            d = orig_packet.pack()
-            d = d[:orig_packet.hl * 4 + 8]
+            d = orig_packet.payload.pack()
+            d = d[:orig_packet.payload.hl * 4 + 8]
             d = struct.pack("!HH", 0, 0) + d
             msg.payload = d
 
@@ -568,10 +593,9 @@ class Tutorial (object):
         e.payload = ipp
 
         # send this packet to the switch
-        log.debug(
-            '[r%d] Sending ICMP TYPE %d for IP %s on port %d' % (self.connection.dpid, tp, dest_ip, dest_port.id))
+        log.debug('router {}; Sending ICMP TYPE {}; code {}; dest_ip {}; output_port {}'.format(self.connection.dpid, tp, code, dest_ip, dest_port.id))
         self.send_packet(None, e, dest_port.id, of.OFPP_NONE)
-        #todo : check send_packet
+        # todo : check send_packet
 
     def _handle_PacketIn (self, event):
         """
@@ -651,10 +675,9 @@ class Tutorial (object):
     def act_like_router(self, packet, packet_in):
 
         if packet.type == ethernet.IP_TYPE:
-            log.debug("act_like_router: IP_TYPE")
+            log.debug("act_like_router: received IP_TYPE packet. src_ip {}; dest_ip {}; ttl {}".format(packet.payload.srcip, packet.payload.dstip, packet.payload.ttl))
             self.handle_ip(packet, packet_in)
         elif packet.type == ethernet.ARP_TYPE:
-            log.debug("act_like_router: ARP_TYPE")
             self.handle_arp(packet, packet_in)
         else:
             return
@@ -666,15 +689,15 @@ class Tutorial (object):
         self.forward_table[packet.src] = packet_in.in_port
 
         if packet.dst in self.forward_table:
-            log.debug('Found dest in table. Adding flow rule for: packet: dest = {}; src = {}; in_port = {}'.format(packet.dst, packet.src, packet_in.in_port))
+            log.debug('Found dest in table. Adding flow rule for Switch: {}; packet: dest = {}; src = {}; in_port = {}'.format(self.connection.dpid, packet.dst, packet.src, packet_in.in_port))
             self.send_flow_mod(packet, packet_in, self.forward_table[packet.dst])
         else:
-            #### FLOODING
-            log.debug('Flooding packet: dest = {}; src = {}; in_port = {}'.format(packet.dst, packet.src, packet_in.in_port))
+            # FLOODING
+            log.debug('Flooding packet in switch: {}; dest = {}; src = {}; in_port = {}'.format(self.connection.dpid, packet.dst, packet.src, packet_in.in_port))
             self.send_packet(packet_in.buffer_id, packet_in.data, of.OFPP_FLOOD, packet_in.in_port)
 
     def remove_flow(self, source):
-        log.debug('Remove flow rule in SW: {}; dl_dest = {}'.format(self.connection.dpid, source))
+        log.debug('Remove flow rule for :Switch {}; dl_dest = {}'.format(self.connection.dpid, source))
         fm = of.ofp_flow_mod()
         fm.command = of.OFPFC_DELETE
         fm.match.dl_dst = source # change this if necessary

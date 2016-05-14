@@ -29,12 +29,14 @@ class WanTopology( Topo ):
         routers = [
                 self.addSwitch('r100', dpid=int2dpid(100)),
                 self.addSwitch('r101', dpid=int2dpid(101)),
-                self.addSwitch('r102', dpid=int2dpid(102))
+                self.addSwitch('r102', dpid=int2dpid(102)),
+                self.addSwitch('r103', dpid=int2dpid(103))
             ]
         switches = [
                 self.addSwitch('s200', dpid=int2dpid(200)),
                 self.addSwitch('s201', dpid=int2dpid(201)),
-                self.addSwitch('s202', dpid=int2dpid(202))
+                self.addSwitch('s202', dpid=int2dpid(202)),
+                self.addSwitch('s203', dpid=int2dpid(203))
             ]
         hosts = [
                 self.addHost('h1', ip='10.0.0.10/24'),
@@ -45,7 +47,8 @@ class WanTopology( Topo ):
                 self.addHost('h6', ip='10.0.1.60/24'),
                 self.addHost('h7', ip='10.0.2.70/24'),
                 self.addHost('h8', ip='10.0.2.80/24'),
-                self.addHost('h9', ip='10.0.2.90/24')
+                self.addHost('h9', ip='10.0.2.90/24'),
+                self.addHost('h10', ip='10.0.3.10/24')
         ]
 
         # Add Edges
@@ -53,9 +56,12 @@ class WanTopology( Topo ):
                     Edge(routers[0], switches[0]),
                     Edge(routers[1], switches[1]),
                     Edge(routers[2], switches[2]),
+                    Edge(routers[3], switches[3]),
                     Edge(routers[0], routers[1]),
                     Edge(routers[1], routers[2]),
                     Edge(routers[2], routers[0]),
+                    Edge(routers[0], routers[3]),
+                    Edge(routers[2], routers[3]),
                     Edge(switches[0], hosts[0]),
                     Edge(switches[0], hosts[1]),
                     Edge(switches[0], hosts[2]),
@@ -64,7 +70,8 @@ class WanTopology( Topo ):
                     Edge(switches[1], hosts[5]),
                     Edge(switches[2], hosts[6]),
                     Edge(switches[2], hosts[7]),
-                    Edge(switches[2], hosts[8])
+                    Edge(switches[2], hosts[8]),
+                    Edge(switches[3], hosts[9])
             ]
 
         for edge in edges:
