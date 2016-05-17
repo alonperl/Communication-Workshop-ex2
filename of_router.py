@@ -73,6 +73,8 @@ class RoutingTable(object):
             table_str += '\nsubnet: ' + self.ipv4_tup_to_str(key[0]) + ", mask: " +\
                                                             self.ipv4_tup_to_str(key[1]) + ", destination: " + str(dest.id)
         return  table_str
+
+
 class Network(object):
     __metaclass__ = SingletonType
 
@@ -81,7 +83,6 @@ class Network(object):
             self.dpid = dpid
             self.ports = {}  # id:ports(object)
             self.tutorial = None
-
 
     class Port(object):
         def __init__(self):
@@ -207,14 +208,16 @@ class Network(object):
         log.debug("In update flow rules!")
         for r_id, r in self.routers.iteritems():
             r_table = self.get_routing_table(r_id)
+            flows_to_remove = []
             if r.tutorial:
                 for fr in r.tutorial.flow_rules:
                     
                     # check if there is port conflict for old flow mod vs. new routing table
+                    # fr = (packet_in.in_port, dest_ip, dest_port, dest_mac)
                     lookup = r_table.lookup(fr[1])
-                    # if lookup:
-                    #     log.debug("r_id : {} r_table: {}\n lookup: {}".format(r_id, str(r_table), lookup.id))
-                    if lookup and lookup.id == fr[2].id:
+                    if not fr[2] and not lookup:
+                        continue
+                    if lookup and fr[2] and lookup.id == fr[2].id:
                         continue
                     else:
                         fm = of.ofp_flow_mod()
@@ -223,9 +226,12 @@ class Network(object):
                         fm.match.dl_type = ethernet.IP_TYPE
                         # fm.match.dl_dst = EthAddr(fr[3])
                         fm.match.nw_dst = IPAddr(fr[1])
-                        log.debug("Removing Flow Rule for router {}, port {}, dstip {}".format(r_id, fr[2].id, fr[1]))
-                        r.tutorial.flow_rules.remove(fr)
+                        log.debug("Removing Flow Rule for router {}, dstip {}".format(r_id, fr[1]))
+                        flows_to_remove.append(fr)
+
                         r.tutorial.connection.send(fm)
+                for fr in flows_to_remove:
+                    r.tutorial.flow_rules.remove(fr)
             else:
                 log.debug("rid: {} Tutorial not exist".format(r_id))
 
@@ -237,6 +243,7 @@ class Network(object):
             r_table.add(port.ip,port.mask,port)
 
         shortest_paths = self.compute_dijkstra(router_id)
+
         for r_id,rout in self.routers.iteritems():
             if rout is not r:
                 for port_id, port in rout.ports.iteritems():
@@ -499,7 +506,7 @@ class Tutorial (object):
     def handle_arp(self, packet, packet_in):
         self.network.lock.acquire()
         port = self.network.routers[self.connection.dpid].ports[packet_in.in_port]
-        log.debug("GOT ARP packet, type: {}; in port_mac {}; from hwsrc {}; to hwdst: {};".format(packet.payload.opcode, port.mac,str(packet.payload.hwsrc),str(packet.payload.hwdst)))
+        log.debug("GOT ARP packet at router {}, type: {}; in port_mac {}; from hwsrc {}; to hwdst: {};".format(self.connection.dpid, packet.payload.opcode, port.mac, str(packet.payload.hwsrc), str(packet.payload.hwdst)))
         if packet.payload.opcode == arp.REQUEST and port.ip == str(packet.payload.protodst):
             my_arp = arp()
             my_arp.opcode = arp.REPLY
@@ -524,7 +531,7 @@ class Tutorial (object):
                 self.handle_ip(self.waiting_arp_requests[str(packet.payload.protosrc)][0], self.waiting_arp_requests[str(packet.payload.protosrc)][1])
                 self.network.lock.acquire()
                 del self.waiting_arp_requests[str(packet.payload.protosrc)]
-                # TODO: check if handle_ip call is
+                
         self.network.lock.release()
 
     def send_arp_request(self, req_ip, port):
@@ -595,7 +602,6 @@ class Tutorial (object):
         # send this packet to the switch
         log.debug('router {}; Sending ICMP TYPE {}; code {}; dest_ip {}; output_port {}'.format(self.connection.dpid, tp, code, dest_ip, dest_port.id))
         self.send_packet(None, e, dest_port.id, of.OFPP_NONE)
-        # todo : check send_packet
 
     def _handle_PacketIn (self, event):
         """
@@ -675,7 +681,7 @@ class Tutorial (object):
     def act_like_router(self, packet, packet_in):
 
         if packet.type == ethernet.IP_TYPE:
-            log.debug("act_like_router: received IP_TYPE packet. src_ip {}; dest_ip {}; ttl {}".format(packet.payload.srcip, packet.payload.dstip, packet.payload.ttl))
+            log.debug("act_like_router: router_id {}, received IP_TYPE packet. src_ip {}; dest_ip {}; ttl {}".format(self.connection.dpid, packet.payload.srcip, packet.payload.dstip, packet.payload.ttl))
             self.handle_ip(packet, packet_in)
         elif packet.type == ethernet.ARP_TYPE:
             self.handle_arp(packet, packet_in)
