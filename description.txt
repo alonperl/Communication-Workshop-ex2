@@ -1,0 +1,46 @@
+David Saper 30259803(cs user: dav_sap)
+Alon Perl 20063088(cs user: alonperl)
+
+Files in submission:
+utils.py
+of_router.py
+description.txt
+
+Part I - We created the class Routing Table, with all the added methods required. Our way of
+implementing the routing table, was to get the subnet of each ip. Save the subnet in the table with the mask
+and point to correct destination which is a Port object we created in class network. 
+The lookup method got an ip address and masked it every time with mask from the table and checked if it returns
+the same subnet. If so the Port is returned.
+
+Part II - We wrote a parser the goes over the config file. The parser fills a dictionary of routers. With all
+Router objects creates. A router object holds a dictionary of Port objects we created as well. A timer thread
+that parses the config every X seconds is started once, at the first time the config is read. Every Router
+also hold the matching tutorial if it exists already.(it should unless the network has not been initialized in the 
+mininet yet)
+
+Part III  - We wrote the dijkstra algorithm as it's written in psudo code in Wikipedia, after getting the Prev
+dictionary at the end, we go over it, and transform it to a next hop dictionary as requested.
+
+part IV - At first we add all the local subnets to the Routing Table and then we go over the shortest path computed 
+the dijkstra algorithm, and if the ip of that port is not in the Routing table already, we add
+the next hop this router needs to get to every router and which port it takes.
+
+Part V - handle arp method was pretty straight forward. If an arp request was received, an arp reply was created and
+sent back. If an arp reply was received, if the reply if for a arp request that was sent before, meaning it's
+in the waiting arp requests, then the packet and send it out.
+
+Part VI - Sending an icmp message. The method was taken from the file given in the ex. A few changes have been made
+like using the Port object we created.
+
+Part VII = The toughest part, writing the handle_ip method. Which like it's description has a lot of conditions
+and complicated comparisons. We used the destination ip to find in the routing table the destination port.
+To check if the dest ip is in the subnet of the dest port. We used the functions we wrote in the Routing Table
+class. If a flow needs to be added. we wrote the send_router_flow method to add flows for routers. Which
+is pretty much like in switch just. We kept our own list of flows, so we can go over them when we want to 
+delete flows every time the config gets updated. Flows are removed if the Routing Table has been changed,
+and they have different dest_port than the Routing Table lookup return value.
+
+Part VII - Just added a act_like_router that passes the packet to the right handle_ip or handle_arp depending on 
+the msg received. and changed the handle_packet_in to send to act_like router when the dpid fits a router.
+
+ 
